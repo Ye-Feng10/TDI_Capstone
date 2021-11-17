@@ -1,0 +1,422 @@
+---
+title: "Side Effects of COVID-19 Vaccine"
+author: "Ye Feng"
+date: "11/16/2021"
+output:
+  slidy_presentation: default
+  beamer_presentation: default
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(cache.comments = FALSE)
+knitr::opts_chunk$set(autodep = TRUE)
+knitr::dep_auto()
+knitr::opts_chunk$set(echo = FALSE,message = FALSE,warning = FALSE,comment = '',tidy=TRUE,tidy.opts = list(blank = FALSE))
+```
+
+
+```{r}
+invisible(lapply(c("tidyverse","readr","lubridate"),function(x) suppressPackageStartupMessages(require(x, character.only=TRUE))))
+```
+
+```{r,chunk1,cache=TRUE,message = FALSE,warning = FALSE}
+library(zoo)
+library(readr)
+library(tidyverse)
+library(echarts4r)
+library(echarts4r.maps)
+library(magrittr)
+
+
+df_vis <- read_csv("df_vis.csv")
+df_vis <- df_vis[,-1]
+us <- read.csv("us_state_vaccinations.csv")
+sym <- read.csv("long_symptoms.csv")
+feature_imp <- read.csv("feature_imp.csv")
+  
+# count by date
+df_vis$date.vax <- as.Date(df_vis$VAX_DATE, format="%m/%d/%Y")
+count <- df_vis %>% group_by(date.vax) %>% summarise(n = n())  %>% distinct()
+
+us$date.vax <- as.Date(us$date,format="%Y-%m-%d")
+
+df_temp <- na.locf(na.locf(us), fromLast = TRUE)
+
+df <- df_temp %>% group_by(date.vax) %>%
+  summarise(total = sum(total_vaccinations,na.rm = T), daily = sum(daily_vaccinations_raw,na.rm = T)) %>%
+  left_join(count, by = "date.vax")
+
+df <- na.omit(df)
+df$rate <-df$n/df$daily
+
+
+## Plot 1
+# visualize daily rate of adverse event
+df_l <- gather(df, Number, Value, total:rate, factor_key=TRUE)
+
+df_l[df_l$Number == "total" & df_l$date.vax == "2021/9/28",]$Value <- df_l[df_l$Number == "total" & df_l$date.vax == "2021/9/27",]$Value + df_l[df_l$Number == "daily" & df_l$date.vax == "2021/9/28",]$Value
+df_l[df_l$Number == "total" & df_l$date.vax == "2021/10/27",]$Value <- df_l[df_l$Number == "total" & df_l$date.vax == "2021/10/26",]$Value + df_l[df_l$Number == "daily" & df_l$date.vax == "2021/10/27",]$Value
+df_l[df_l$Number == "total" & df_l$date.vax == "2021/10/28",]$Value <- df_l[df_l$Number == "total" & df_l$date.vax == "2021/10/27",]$Value + df_l[df_l$Number == "daily" & df_l$date.vax == "2021/10/28",]$Value
+
+p1 <- df_l |> filter(date.vax >= as.Date("2021/01/01")) |>
+  filter(Value != 0) |>
+  filter(!is.infinite(Value)) |>
+  group_by(Number) |> 
+  e_charts(date.vax, timeline = TRUE) |> 
+  e_line(Value, legend = FALSE) |> 
+  e_tooltip(trigger = "axis") |> 
+  e_timeline_opts(
+    axis_type = "category",
+    playInterval = 1500,
+    top = 5,
+    right = 50,
+    left = 200
+  ) |> 
+  e_datazoom() |> 
+  e_timeline_serie(
+    title = list(
+      list(text = "Total Vaccination"),
+      list(text = "Daily Vaccination"),
+      list(text = "Total Adverse event report"),
+      list(text = "Adverse Event Rate")
+    )
+  ) 
+
+# plot 2: visualize by manufacturer
+df2 <- df_vis %>% group_by(date.vax,VAX_MANU) %>% summarise(n = n())  %>% distinct()
+p2 <- df2 |> filter(date.vax >= as.Date("2021/01/01")) |>
+  group_by(VAX_MANU) |> 
+  filter(VAX_MANU != "UNKNOWN MANUFACTURER") |>
+  e_charts(date.vax) |> 
+  e_line(n, legend = FALSE) |> 
+  e_tooltip(trigger = "axis") |> 
+  e_datazoom() |> 
+  e_title("Adverse Events report by Manufacturer")
+
+# plot 3: visualize by US.State
+# last day is
+df3 <- df_vis %>% group_by(STATE) %>% summarise(n = n())  %>% distinct() %>% mutate(location = state.name[match(STATE, state.abb)])
+df3 <- df3 %>% left_join(us %>% filter(date.vax == "2021-10-28"),by = "location")
+df3 <- na.omit(df3)
+df3$rate <- df3$n/df3$people_vaccinated
+json <- jsonlite::read_json("https://raw.githubusercontent.com/shawnbot/topogram/master/data/us-states.geojson")
+
+.scl <- function(x){
+  (x - min(x)) / (max(x) - min(x))
+}
+
+p3 <- df3 |> 
+  mutate(
+    AE = .scl(n),
+    Total = .scl(total_vaccinations),
+    Rate = .scl(rate)
+  ) |> 
+  select(location, AE, Total, Rate) |> 
+  group_by(location) |> 
+  tidyr::gather("Key",  "Value", AE, Total, Rate) |> 
+  group_by(Key) |> 
+  e_charts(location, timeline = TRUE) |> 
+  e_map_register("USA", json) |> 
+  e_map(Value, map = "USA") |> 
+  e_visual_map(min = 0, max = 1) |> 
+  e_timeline_serie(
+    title = list(
+      list(text = "AE", subtext = "Total Number of reported AE"),
+      list(text = "Rate", subtext = "Adverse event rate"),
+      list(text = "Total", subtext = "Total people vaccinated")
+    )
+  )
+
+# symptoms
+cnt <- sym |> 
+  group_by(DIED,SYMPTOM) |>
+  summarise(n=n()) |>
+  group_by(DIED) |>
+  top_n(20)
+
+cnt |> filter(DIED == 1) %>%
+  filter(SYMPTOM != "Death") %>%
+  arrange(n)%>%
+  e_charts(x = SYMPTOM, elementId = "Died") %>%
+  e_bar(n, legend = TRUE, name = "Died") %>% 
+  e_labels(position = "right") %>% 
+  e_tooltip(
+    trigger = "item",
+    axisPointer = list(
+      type = "line"
+    )
+  )  %>% 
+  e_title("Died") %>% 
+  e_flip_coords() %>% 
+  e_y_axis(splitLine = list(show = FALSE), axisLabel = list(
+    interval = 0L
+  )) %>% 
+  e_x_axis(show = FALSE) %>% 
+  e_toolbox_feature(
+    feature = "saveAsImage",
+    title = "Save as image"
+  ) -> echrtDied
+
+cnt |> filter(DIED == 0) %>%
+  arrange(n)%>%
+  e_charts(x = SYMPTOM) %>%
+  e_bar(n, legend = TRUE, name = "Not Died") %>% 
+  e_labels(position = "right") %>% 
+  e_tooltip(
+    trigger = "item",
+    axisPointer = list(
+      type = "line"
+    )
+  ) %>% 
+  e_title("Not Died") %>% 
+  e_flip_coords() %>% 
+  e_y_axis(splitLine = list(show = FALSE), axisLabel = list(
+    interval = 0L
+  )) %>% 
+  e_x_axis(show = FALSE) %>% 
+  e_connect("Died") %>%
+  e_toolbox_feature(
+    feature = "saveAsImage",
+    title = "Save as image"
+  ) -> echrtND
+
+cnt2 <- sym |> 
+  group_by(HOSPITAL,SYMPTOM) |>
+  summarise(n=n()) |>
+  group_by(HOSPITAL) |>
+  top_n(20)
+
+cnt2 |> filter(HOSPITAL == 1) %>%
+  filter(SYMPTOM != "Death") %>%
+  arrange(n)%>%
+  e_charts(x = SYMPTOM, elementId = "Hospitalized") %>%
+  e_bar(n, legend = TRUE, name = "Hospitalized") %>% 
+  e_labels(position = "right") %>% 
+  e_tooltip(
+    trigger = "item",
+    axisPointer = list(
+      type = "line"
+    )
+  )  %>% 
+  e_title("Hospitalized") %>% 
+  e_flip_coords() %>% 
+  e_y_axis(splitLine = list(show = FALSE), axisLabel = list(
+    interval = 0L
+  )) %>% 
+  e_x_axis(show = FALSE) %>% 
+  e_toolbox_feature(
+    feature = "saveAsImage1",
+    title = "Save as image"
+  ) -> echrtHos
+
+cnt2 |> filter(HOSPITAL == 0) %>%
+  arrange(n)%>%
+  e_charts(x = SYMPTOM) %>%
+  e_bar(n, legend = TRUE, name = "Not Hospitalized") %>% 
+  e_labels(position = "right") %>% 
+  e_tooltip(
+    trigger = "item",
+    axisPointer = list(
+      type = "line"
+    )
+  ) %>% 
+  e_title("Not Hospitalized") %>% 
+  e_flip_coords() %>% 
+  e_y_axis(splitLine = list(show = FALSE), axisLabel = list(
+    interval = 0L
+  )) %>% 
+  e_x_axis(show = FALSE) %>% 
+  e_connect("Hospitalized") %>%
+  e_toolbox_feature(
+    feature = "saveAsImage1",
+    title = "Save as image"
+  ) -> echrtNHos
+
+p_fi <- feature_imp |> arrange(X0) |>
+  e_charts(x = index) %>%
+  e_bar(X0, legend = TRUE, name = "Importance") %>% 
+  e_labels(position = "right") %>% 
+  e_tooltip(
+    trigger = "item",
+    axisPointer = list(
+      type = "line"
+    )
+  ) %>% 
+  e_title("Feature Importance in Random Forest") %>% 
+  e_flip_coords() %>% 
+  e_y_axis(splitLine = list(show = FALSE), axisLabel = list(
+    interval = 0L
+  )) 
+
+p_hos <- df_vis %>% group_by(HOSPITAL) %>% summarise(n = n()) %>%
+  mutate(HOSPITAL = as.factor(HOSPITAL)) %>%
+  e_charts(x =HOSPITAL) %>% 
+  e_bar(n, legend = TRUE, name = "Hospitalized")
+```
+
+
+## Introduction
+
+* We are now in the middle of COVID-19 pandemic. The good news is now we have the vaccines against COVID-19.
+
+* By Nov.16th, 79.7% of people in United States of 12+ had at one dose of COVID-19 vaccination. 
+
+* COVID-19 vaccine can help protect people from getting COVID-19, however, there are many hesitations about whether one should take the vaccine or not.
+
+* Instead of rely on information from new articles, try to digest academic journal papers, or simply trust someone you know, we can take look at the data, and help people to make the most informed decision about getting vaccinated.
+
+## Data
+
+* In this project, I used data from the “Vaccine Adverse Event Reporting System” (VAERS: <https://vaers.hhs.gov/data.html>).
+
+* VAERS is a national reporting system designed to detect early safety problems for licensed vaccines. The healthcare providers, individual patients, and vaccine manufacturers can submit reports of adverse symptoms to the system. 
+
+* The dataset contains individuals' basic information (gender, age, medical history), vaccine information (manufacturers, series of doses), and descriptions of adverse symptoms.
+
+
+## VARES Data 
+
+* The VARES data containes reports about advers events of COVID-19 vaccines since 2020 to 2021/10/28. 
+ 
+* A total of 634,606 entries of persons who reported experiencing one or several adverse events after a COVID-19 vaccination dose. 
+
+* Notice that this is a voluntary reported data, meaning that it only contains a small subset of the whole group who had COVID-19 vaccine dose. 
+
+
+## Time trends of Vaccination report
+
+```{r}
+p1
+```
+
+
+## The number of AEs reported by each manufacturer
+
+```{r}
+p2
+```
+
+## AE report in United States (by 10/28/2021)
+
+```{r}
+p3
+```
+
+## Questions
+
+People hesitate about take COVID-19 vaccination concerns about "How bad are the side effects?", "I have a medical history, will I get hospitalized if I take the vaccine?"
+
+In this project, I aim to use VARES data to help people making informed decision of taking COVID-19 vaccination:
+
+* Before Vaccinated: Can we predict patients' need the hospitalization based on pre-vaccine information?
+
+* After Vaccinated: Can we identify the most predictive symptoms for the patients' need of hospitalization after vaccination? 
+
+## Before Vaccinated
+
+I used features selected based on patient information include: 
+
+* Age, 
+
+* Gender, 
+
+* Yes/No Current illness, 
+
+* Yes/No taking other medicines, 
+
+* Yes/No Allergies to medications
+
+I also examined the patients medication history and selected features based on report frequencies and CDC risk assessment recommendations, the selected features include: 
+
+* allergy to COVID-19 vaccine
+
+* Diabetes
+
+* High blood pressure
+
+* High cholesterol
+
+* Heart Disease
+
+* Asthma
+
+* Anxiety
+
+* Depression
+
+* Cancer
+
+* Arthritis
+
+The series of doses, and the manufacturer of vaccines are also included.
+
+```{r}
+p_hos
+```
+
+
+## Needs for Hospitalization Prediction
+
+Logistic regression and Random forest model were used to classify the patients with needs for hospitalization.
+
+* Logistic regression: 
+
+Accuracy: 0.6942
+
+The f1 score: 0.3038
+
+* Random Forest
+
+Accuracy: 0.9106
+
+The f1 score for the testing data: 0.3987
+
+## Feature Importance Based on Random Forest
+
+```{r}
+p_fi
+```
+
+## After Vaccined (Died)
+
+```{r}
+e_arrange(echrtDied, echrtND, rows = 1, cols = 2)
+```
+
+## After Vaccined (Hospitalized)
+
+```{r}
+e_arrange(echrtHos, echrtNHos, rows = 1, cols = 2)
+```
+
+## After Vaccined
+
+* In order to predict needs for hospitalization with adverse symptoms, the challenge is to reduced 10403 unique input entries of symptoms to fewer features. 
+
+* To solve the problem with high dimensional sparse feature, I used sparse PCA to reduce the dimensionality of symptoms feature based on 1110 symptoms that related to Hospitalize.
+
+* Based on 5 number of PCA components, within top 10 symptoms, 20 unique symptoms are identified:
+
+
+'Computerised tomogram', 'Vomiting', 'SARS-CoV-2 test negative', 'Fatigue', 'Magnetic resonance imaging', 'Electrocardiogram', 'Nausea', 'Pain in extremity', 'Headache', 'Chest discomfort', 'Post transplant lymphoproliferative disorder', 'Facial neuralgia', 'Injection site vesicles', 'Asthenia', 'Pyrexia', 'Myalgia', 'Blood test', 'Dizziness', 'Chest pain', 'Dyspnoea'
+
+
+* Next Step: Use PCA reduced features to predict the needs of hospitalization
+
+
+## Summary
+
+* Overall, only a small number of persons who got vaccination reported adverse symptoms
+
+* PFIZER had more reported adverse events
+
+* Most persons reported lighter symptoms (Headache, pyrexia/fewer, chills)
+
+* Use pre-vaccine information, age appeared to be the most important feature in predicting needs for hospitalization
+
+* The most frequent reported symptoms do not differ much between hospitalized patients and non-hospitalized patients
+
+* More works are needed in predicting needs for hospitalization (feature engineering, hyperparameter optimization, etc)
